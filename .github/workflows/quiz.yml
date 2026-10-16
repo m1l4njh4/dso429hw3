@@ -1,13 +1,17 @@
 name: Answer hourly quiz
 
+# GitHub throttles cron on low-traffic repos (gaps of 4+ hours), so each run
+# stays alive ~5.5 hours polling every 3 minutes, then dispatches the next
+# run itself. The cron schedule is only a backup to restart a broken chain.
+
 on:
   schedule:
-    # Every 10 minutes, off the top of the hour (GitHub delays :00 runs the most).
     - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: quiz
@@ -16,32 +20,44 @@ concurrency:
 jobs:
   answer:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: Solve unanswered rounds
+      - name: Answer rounds every 3 minutes
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: python run.py
-
-      - name: Commit and push
-        if: always()
         run: |
           git config user.name "quiz-bot"
           git config user.email "quiz-bot@users.noreply.github.com"
-          git add answers state
-          if git diff --cached --quiet; then
-            echo "No changes."
-            exit 0
-          fi
-          git commit -m "Answers $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3; do
-            git pull --rebase origin main && git push origin HEAD:main && exit 0
-            sleep 10
+          end=$((SECONDS + 330 * 60))
+          while [ $SECONDS -lt $end ]; do
+            # Pick up any solver fixes pushed since the last pass.
+            git pull --rebase --quiet origin main || git rebase --abort
+            status=0
+            python run.py || status=$?
+            git add answers state
+            if ! git diff --cached --quiet; then
+              git commit -m "Answers $(date -u +%Y-%m-%dT%H:%MZ)"
+              for i in 1 2 3; do
+                git pull --rebase origin main && git push origin HEAD:main && break
+                sleep 10
+              done
+            fi
+            # run.py exits 1 only when a new round contains unsolved questions:
+            # fail the run so GitHub emails you (the next run still starts below).
+            if [ $status -ne 0 ]; then exit 1; fi
+            sleep 180
           done
-          exit 1
+
+      - name: Start the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run quiz.yml --ref main --repo ${{ github.repository }}

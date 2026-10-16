@@ -3,8 +3,8 @@
 Questions the deterministic solver can't confidently answer go to an LLM via
 OpenRouter (if OPENROUTER_API_KEY is set). Rounds that still contain a guess
 are recorded in state/pending.json and retried on later runs while they are
-inside the 3-hour edit window. Exits 1 if anything was guessed, so the
-GitHub Actions run shows as failed and emails you.
+inside the 3-hour edit window. Exits 1 the first time a round has a guess
+(not on retries), so the GitHub Actions run shows as failed and emails you.
 """
 
 import csv
@@ -110,8 +110,9 @@ def main():
             path.write_text(new)
             written.append(rid)
         if guessed:
+            if str(rid) not in pending:
+                unsure = True
             pending[str(rid)] = guessed
-            unsure = True
         else:
             pending.pop(str(rid), None)
 
